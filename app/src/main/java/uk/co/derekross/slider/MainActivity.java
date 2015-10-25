@@ -11,12 +11,14 @@ import android.util.Log;
 import android.view.View;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.WindowManager;
 import android.widget.ImageView;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 import retrofit.Call;
@@ -31,11 +33,16 @@ import uk.co.derekross.slider.Retrofit.RetroFitHelper;
 
 public class MainActivity extends AppCompatActivity {
     public static final String TAG = "MainActivity";
+    public static final int COUNTDOWN_SECONDS = 2;
     private ImageView mIVMain;
     private ArrayList<Bitmap> mBitMaps = new ArrayList<Bitmap>();
     private ReentrantReadWriteLock mRWbitmapsLock = new ReentrantReadWriteLock(false);
     private ReentrantReadWriteLock mRWidsLock = new ReentrantReadWriteLock(false);
     private ArrayList<String> mIds = new ArrayList<String>();
+    private volatile boolean mStopSlide = false;
+    private volatile boolean mCreatingBitMaps = false;
+    private volatile boolean mLoopStarted = false;
+    private CountDownLatch mCDLatch= new CountDownLatch(1);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -54,7 +61,11 @@ public class MainActivity extends AppCompatActivity {
         });
 
 
+        //get access to the image view
         mIVMain = (ImageView) findViewById(R.id.IVMain);
+
+        //prevent the screen from turning off
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
     @Override
@@ -82,13 +93,16 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+
+        //TODO persist the ids so the process can start quickly
+        //at first start up get data from imgur. this will start the whole process
         new Thread(new RetrieveDataFromImgur("gonewild", 5)).run();
 
     }
 
     /*Method to add a bitmap to the arraylist. this is done within a write lock
         * to ensure it remains in sync*/
-    private void addToBitmaps(Bitmap bitmap){
+    private void addToBitmaps(Bitmap bitmap) {
         mRWbitmapsLock.writeLock().lock();
         mBitMaps.add(bitmap);
         mRWbitmapsLock.writeLock().unlock();
@@ -96,7 +110,7 @@ public class MainActivity extends AppCompatActivity {
 
     /*Method to add a string id to the arraylist of Id's. done with a
     * write lock to remain in sync*/
-    private void addToIds(String id){
+    private void addToIds(String id) {
         mRWidsLock.writeLock().lock();
         mIds.add(id);
         mRWidsLock.writeLock().unlock();
@@ -106,7 +120,7 @@ public class MainActivity extends AppCompatActivity {
     /*Method to remove the first bitmap and return it. this is controlled by a
     * write lock to avoid the arraylist coming out of sync*/
     private Bitmap getNextBitmap() {
-
+        //TODO do check to make sure there are bitmaps. consider when screen changes and clears out array
         mRWbitmapsLock.writeLock().lock();
         Bitmap b = mBitMaps.remove(0);
 
@@ -117,23 +131,42 @@ public class MainActivity extends AppCompatActivity {
 
     /*Method to remove the first id from the bitmap and return it. Done within
     * a write lock to keep the arraylist in sync*/
-    private String getNextId(){
+    private String getNextId() {
         mRWidsLock.writeLock().lock();
         String s = mIds.remove(0);
         mRWidsLock.writeLock().unlock();
         return s;
     }
 
+    /*Method to get the length of the Ids array. this is done within a read lock*/
+    private int getIdsLengh() {
+        int l;
+        mRWidsLock.readLock().lock();
+        l = mIds.size();
+        mRWidsLock.readLock().unlock();
+
+        return l;
+    }
+
+    /*Method to get the size of the bitmaps array. this is done within a read lock*/
+    private int getBitmapsLength() {
+        int l;
+        mRWbitmapsLock.readLock().lock();
+        l = mBitMaps.size();
+        mRWbitmapsLock.readLock().unlock();
+
+        return l;
+    }
 
 
     /*A class that implements runnable. It takes a String URL and
     * converts it into a bitmap. This bitmap is then added to the arraylist of
     * bitmaps. All will be performed in a background thread.*/
-    public class createBitMap implements Runnable{
+    public class createBitMap implements Runnable {
         private String url;
         private Bitmap bitmap = null;
 
-        createBitMap(String url){
+        createBitMap(String url) {
             this.url = url;
         }
 
@@ -147,18 +180,25 @@ public class MainActivity extends AppCompatActivity {
                 e.printStackTrace();
             }
 
-            if(bitmap != null){
+            if (bitmap != null) {
                 addToBitmaps(bitmap);
+                if(mCDLatch.getCount()> 0){
+                    mCDLatch.countDown();
+                }
             }
         }
     }
 
-    public class RetrieveDataFromImgur implements Runnable{
+
+    /*Class to retrieve the data from Imgur. it makes a call to the imgur api
+    * using retrofit. it obtains the picture id's and puts these in the id array
+    * It then generates the bit maps*/
+    public class RetrieveDataFromImgur implements Runnable {
 
         private String subRedit;
         private int page;
 
-        RetrieveDataFromImgur(String subRedit, int page){
+        RetrieveDataFromImgur(String subRedit, int page) {
             this.subRedit = subRedit;
             this.page = page;
         }
@@ -178,8 +218,8 @@ public class MainActivity extends AppCompatActivity {
                 @Override
                 public void onResponse(Response<Model> response, Retrofit retrofit) {
 
-                   //check if the call was a succcess and return to avoid error if not
-                    if(!response.isSuccess()){
+                    //check if the call was a succcess and return to avoid error if not
+                    if (!response.isSuccess()) {
                         Log.e(TAG, "Imgur retrofit Response failed");
                         Log.e(TAG, response.errorBody().toString());
                         Log.e(TAG, response.raw().toString());
@@ -191,15 +231,11 @@ public class MainActivity extends AppCompatActivity {
                     ArrayList<ImageData> data = model.getData();
 
 
-                    for(ImageData i : data){
+                    for (ImageData i : data) {
                         addToIds(i.getId());
                     }
 
-                    //log 2 ids
-                    Log.e(TAG, "first id is: " + getNextId());
-                    Log.e(TAG, "Second id is " + getNextId());
-
-
+                    generateBitmaps();
 
                 }
 
@@ -209,6 +245,147 @@ public class MainActivity extends AppCompatActivity {
                     return;
                 }
             });
+        }
+    }
+
+    /*Method to generate the bitmaps. It generates as many as stated in the refreshpoint
+    * if there are not enough id's to make the refreshpoint then more are requested from
+    * imgur. This method also starts the countdown loop if not already started*/
+    private void generateBitmaps() {
+        int idsLength = getIdsLengh();
+        int loopTo;
+        int refreshPoint = 10;
+
+        //mCreatingBitMaps is a flag to show the method is running. If it is already running then
+        //this method just returns.
+        if (!mCreatingBitMaps) {
+            mCreatingBitMaps = true;
+
+            //if there are more id's than the refreshpoint then loop until the refreshpoint
+            if (idsLength > refreshPoint) {
+                loopTo = refreshPoint;
+            } else {
+                //get fresh id's from imgur
+                new Thread(new RetrieveDataFromImgur("onoff", 9)).start();
+
+                //if there are no ids, return immediately. this method will be called
+                //again once more ids are available
+                if (idsLength == 0) {
+                    mCreatingBitMaps = false;
+                    return;
+                }
+
+                //if there are ids, loop until all current used.
+                loopTo = idsLength;
+            }
+
+            //Loop to generate the bitmaps. The bitmaps will be created Asynchronously
+            for (int i = 0; i < loopTo; i++) {
+                String url = "http://i.imgur.com/" + getNextId() + ".jpg";
+                new Thread(new createBitMap(url)).start();
+            }
+
+            //If this is the first time the method is run, start the countdown loop
+            if (!mLoopStarted) {
+                new Thread(new CountDown(COUNTDOWN_SECONDS, true)).start();
+                mLoopStarted = true;
+            }
+
+            mCreatingBitMaps = false;
+
+
+        }
+
+
+    }
+
+    /*Runnable class to create a countdown to loop through the pictures.
+    * This sleeps the thread then requests the ui thread to display the next picture.
+    * A check is performed on the remaining bitmaps and generates new bitmaps once
+    * they get under 5*/
+    public class CountDown implements Runnable {
+
+        private int Secs;
+        private boolean firstTime;
+
+
+        public CountDown(int Secs, boolean firstTime) {
+            this.Secs = Secs;
+            this.firstTime = firstTime;
+
+        }
+
+        @Override
+        public void run() {
+
+            //if this is the first time. Display the first picture immediately. then
+            //start the countdown
+            if (firstTime) {
+                try {
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+
+                            //await for the first bitmap to be added to the arraylist
+                            try {
+                                mCDLatch.await();
+                            } catch (InterruptedException e) {
+                                e.printStackTrace();
+                            }
+                            mIVMain.setImageBitmap(getNextBitmap());
+                        }
+                    });
+                } catch (Exception e) {
+                    e.printStackTrace();
+                }
+            }
+
+            //every second check if the loop has stopped and return without
+            //displaying the next picture. This is used for direction controls
+            for (int i = 0; i < Secs; i++) {
+
+                try {
+                    Thread.sleep(1000);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+                if (mStopSlide) {
+                    return;
+                }
+
+            }
+
+
+            //show the picture on the UI thread
+            try {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+
+
+                        mIVMain.setImageBitmap(getNextBitmap());
+                    }
+                });
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+
+
+            //once there are less than 5 bitmaps, generate more.
+            if (getBitmapsLength() < 5) {
+                new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        generateBitmaps();
+                    }
+                }).start();
+            }
+
+            //Create a new thread to continue the countdown. This is
+            //not the first one so will do full countdown before
+            //picture is shown.
+            new Thread(new CountDown(COUNTDOWN_SECONDS, false)).start();
+
         }
     }
 
