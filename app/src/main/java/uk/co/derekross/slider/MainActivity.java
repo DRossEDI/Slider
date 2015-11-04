@@ -33,7 +33,7 @@ import uk.co.derekross.slider.Retrofit.RetroFitHelper;
 
 public class MainActivity extends AppCompatActivity {
     public static final String TAG = "MainActivity";
-    public static final int COUNTDOWN_SECONDS = 2;
+    public static final int COUNTDOWN_SECONDS = 5;
     private ImageView mIVMain;
     private ArrayList<Bitmap> mBitMaps = new ArrayList<Bitmap>();
     private ReentrantReadWriteLock mRWbitmapsLock = new ReentrantReadWriteLock(false);
@@ -43,6 +43,14 @@ public class MainActivity extends AppCompatActivity {
     private volatile boolean mCreatingBitMaps = false;
     private volatile boolean mLoopStarted = false;
     private CountDownLatch mCDLatch= new CountDownLatch(1);
+    private CountDownLatch mCDLatchRemovedImage = new CountDownLatch(1);
+    private String[] Subredits = {"onoff","gondwild","nsfw","ass","Amateur","cumsluts",
+            "PetiteGoneWild","HappyEmbarrassedGirls","redheads","anal","LegalTeens",
+            "GWCouples","wifesharing","dirtysmall","Blowjobs","nsfwhardcore","WouldYouFuckMyWife",
+            "AmateurArchives","rearpussy","Innie","BonerMaterial","jilling","LipsThatGrip","pussy",
+            "LabiaGW","grool","amateurcumsluts","asshole","gwcumsluts","lesbians","blackchickswhitedicks",
+            "AnalGW"};
+    private Bitmap mRemovedBitmap;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -57,12 +65,16 @@ public class MainActivity extends AppCompatActivity {
             public void onClick(View view) {
                 Snackbar.make(view, "Replace with your own action", Snackbar.LENGTH_LONG)
                         .setAction("Action", null).show();
+
             }
         });
 
 
         //get access to the image view
         mIVMain = (ImageView) findViewById(R.id.IVMain);
+
+        //create a removed bitmap to check other bitmaps against
+        new Thread(new createRemovedBitmap()).start();
 
         //prevent the screen from turning off
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -93,19 +105,36 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        mStopSlide = false;
 
         //TODO persist the ids so the process can start quickly
         //at first start up get data from imgur. this will start the whole process
-        new Thread(new RetrieveDataFromImgur("gonewild", 5)).run();
+        new Thread(new RetrieveDataFromImgur(getRandomSubredit(), getRandomPage())).run();
 
     }
 
+    @Override
+    protected void onPause() {
+        super.onPause();
+        mStopSlide = true;
+    }
+
     /*Method to add a bitmap to the arraylist. this is done within a write lock
-        * to ensure it remains in sync*/
+            * to ensure it remains in sync*/
     private void addToBitmaps(Bitmap bitmap) {
+        //wait for the removed image to be created
+        try {
+            mCDLatchRemovedImage.await();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        if(!bitmap.sameAs(mRemovedBitmap)){
         mRWbitmapsLock.writeLock().lock();
         mBitMaps.add(bitmap);
         mRWbitmapsLock.writeLock().unlock();
+    } else{
+            Log.e("createBitMap", "Image removed");
+        }
     }
 
     /*Method to add a string id to the arraylist of Id's. done with a
@@ -168,6 +197,7 @@ public class MainActivity extends AppCompatActivity {
 
         createBitMap(String url) {
             this.url = url;
+            Log.e("createBitMap","URL is: "+ url);
         }
 
 
@@ -212,7 +242,7 @@ public class MainActivity extends AppCompatActivity {
 
             RetroFitHelper imgurService = retrofit.create(RetroFitHelper.class);
 
-            Call<Model> response = imgurService.getSubReditData("onoff", 5);
+            Call<Model> response = imgurService.getSubReditData(subRedit, page);
 
             response.enqueue(new Callback<Model>() {
                 @Override
@@ -248,6 +278,17 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    //return a random page number
+    private int getRandomPage(){
+        return (int) Math.floor(Math.random() * 1000);
+
+    }
+    //return a random string
+    private String getRandomSubredit(){
+        int size = Subredits.length;
+        return Subredits[(int) Math.floor(Math.random() * size)];
+    }
+
     /*Method to generate the bitmaps. It generates as many as stated in the refreshpoint
     * if there are not enough id's to make the refreshpoint then more are requested from
     * imgur. This method also starts the countdown loop if not already started*/
@@ -266,7 +307,7 @@ public class MainActivity extends AppCompatActivity {
                 loopTo = refreshPoint;
             } else {
                 //get fresh id's from imgur
-                new Thread(new RetrieveDataFromImgur("onoff", 9)).start();
+                new Thread(new RetrieveDataFromImgur(getRandomSubredit(), getRandomPage())).start();
 
                 //if there are no ids, return immediately. this method will be called
                 //again once more ids are available
@@ -281,7 +322,7 @@ public class MainActivity extends AppCompatActivity {
 
             //Loop to generate the bitmaps. The bitmaps will be created Asynchronously
             for (int i = 0; i < loopTo; i++) {
-                String url = "http://i.imgur.com/" + getNextId() + ".jpg";
+                String url = "http://i.imgur.com/" + getNextId() + "l.jpg";
                 new Thread(new createBitMap(url)).start();
             }
 
@@ -332,7 +373,11 @@ public class MainActivity extends AppCompatActivity {
                             } catch (InterruptedException e) {
                                 e.printStackTrace();
                             }
-                            mIVMain.setImageBitmap(getNextBitmap());
+                            Bitmap b = getNextBitmap();
+
+                            if(b!=null){
+                                mIVMain.setImageBitmap(b);
+                            }
                         }
                     });
                 } catch (Exception e) {
@@ -362,8 +407,11 @@ public class MainActivity extends AppCompatActivity {
                     @Override
                     public void run() {
 
+                        Bitmap b = getNextBitmap();
 
-                        mIVMain.setImageBitmap(getNextBitmap());
+                        if(b!=null){
+                            mIVMain.setImageBitmap(b);
+                        }
                     }
                 });
             } catch (Exception e) {
@@ -389,5 +437,24 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /*Runnable class to createa a removed image. It calls imgur with a fake image id
+    * and decodes the removed image into a bitmap. This is used when other bitmaps
+    * are created to check they have not been removed*/
+    public class createRemovedBitmap implements Runnable{
+        Bitmap bitmap = null;
+        @Override
+        public void run() {
+            try {
+                InputStream in = new URL("http://i.imgur.com/rrrrrrl.jpg").openStream();
+                bitmap = BitmapFactory.decodeStream(in);
+                mRemovedBitmap = bitmap;
+                mCDLatchRemovedImage.countDown();
+                Log.e("createBitMap","Removed Created");
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+
+        }
+    }
 
 }
